@@ -30,13 +30,19 @@
 #define FULL_THERMAL_MEAN        0.99959            // Temperature is fully developed here
 #define DATA_FILENAME			 "data.txt"
 #define MAX_LINE_LENGTH			 1024
+#define MASS_ROCKET				 0.035
+#define FULL_ENGINE				 0.080
+#define EMPTY_ENGINE			 0.040
 
 //  structure for finite-difference solution
 typedef struct
 {
-	double r;   // grid node unit-less position along the length of the plate
-	double Temp;   // grid node temperature (finite-difference solution)
-	double u;        //Fully developed flow velocity
+	double y;      //Fully developed flow velocity
+	double v;
+	double a;
+	double t;
+	double Fr;
+	double Fd;
 }
 PLATEPOINT;
 
@@ -44,28 +50,17 @@ PLATEPOINT;
 typedef struct
 {
 	int scase;		//Case counter (which simulation is it?)
-	int Ny;			//Node count in y (int?)
-	double Pe;		//Biot number
-	double Tfinal;	//When to stop the simulation - The Theta that determines when the simulation ends.
-	double dx;		//the unitless node spacing along pipe
-	double dy;		//the unitless node spacing through pipe
+	int Ny;			//Node count in y
+	int tfinal;	//When to stop the simulation - The Theta that determines when the simulation ends.
+	double dt;
 	int iter;		//Tracking the iteration count
-	int div;       //Print a line of data every div iterations
-	double ThetaMean;
+	int Rocket;
 
 	//Interior limits of the simulation, ex: of a 9 by 5 grid, only the inside 7 by 3 grid is calculated.
 	int NyInter;
 	int run;		//Run the simulatuon? 1=run 0=dont run
 
-	PLATEPOINT *pp;		//The pointer to the first  array of plate points. (t) "current"
-	PLATEPOINT *pp2;	//The pointer to the second array of plate points. (t+1) "future"
-
-	double *tri_hold[4];//Components of Koorosh's Tri-Diagonal solver. Should not be passed to the function
-
-	double *tri_a;		//a-Component of Koorosh's Tri-Diagonal solver
-	double *tri_b;		//b-Component of Koorosh's Tri-Diagonal solver
-	double *tri_c;		//c-Component of Koorosh's Tri-Diagonal solver
-	double *tri_y;		//c-Component of Koorosh's Tri-Diagonal solver
+	PLATEPOINT *r;		//The pointer to the first  array of plate points. (t) "current"
 
 }
 PROGRAMDATA;
@@ -194,8 +189,8 @@ PROGRAMDATA GetProgramData(FILE *f)
 	static int j = 1;           //case counter (how many times 
 	//has this function been called?)
 	//An array of pointers where the read data is to be stored.
-	int *pdpi[] = { &pd.run, &pd.Ny, &pd.div };
-	double *pdp[] = { &pd.Pe, &pd.Tfinal, &pd.dx };
+	int *pdpi[] = { &pd.run, &pd.Rocket, &pd.tfinal };
+	double *pdp[] = { &pd.dt};
 
 	//assume the simulations should not run, Minor protection from read error.
 	pd.run = 0;
@@ -212,7 +207,7 @@ PROGRAMDATA GetProgramData(FILE *f)
 	}//End of for
 
 	// retrieves 2 more lines of 'double' data, and points them to their destination
-	for (i = 0; i<3; i++)
+	for (i = 0; i<1; i++)
 	{
 		fgets(buff, MAX_LINE_LENGTH, f);
 		if (feof(f) != 0){
@@ -250,7 +245,8 @@ PROGRAMDATA GetProgramData(FILE *f)
 PROGRAMDATA allocate(PROGRAMDATA pd)
 {
 	int i;
-	double **pda[] = { &pd.tri_hold[0], &pd.tri_hold[1], &pd.tri_hold[2], &pd.tri_hold[3], &pd.tri_a, &pd.tri_b, &pd.tri_c, &pd.tri_y };
+	pd.Ny = (double)pd.tfinal / pd.dt + 1;
+	pd.NyInter = pd.Ny - 1;
 
 	if (pd.Ny<3)
 	{
@@ -262,27 +258,26 @@ PROGRAMDATA allocate(PROGRAMDATA pd)
 	}
 
 	// allocate memory for a horizontal array of pointers
-	pd.pp = (PLATEPOINT*)malloc(pd.Ny*sizeof(PLATEPOINT));
-	pd.pp2 = (PLATEPOINT*)malloc(pd.Ny*sizeof(PLATEPOINT));
+	pd.r = (PLATEPOINT*)malloc(pd.Ny*sizeof(PLATEPOINT));
 
 	// check allocation for array of pointers
-	if (pd.pp == NULL || pd.pp2 == NULL)
+	if (pd.r == NULL)
 	{
-		printf("Cannot allocate pd.pp or pd.pp2, exiting program...\n");
+		printf("Cannot allocate pd.r, exiting program...\n");
 		getchar();
 		exit(0);
 	}
 
-	//introduce allocation for the new freepp additions.
-	for (i = 0; i<8; i++){
-		*pda[i] = (double*)malloc(pd.Ny*sizeof(double));
-		if (*pda[i] == NULL)
-		{
-			printf("Cannot allocate matrix-array number: %d, exiting program...\n", i);
-			getchar();
-			exit(0);
-		}
-	}
+//	//introduce allocation for the new freepp additions.
+//	for (i = 0; i<8; i++){
+//		*pda[i] = (double*)malloc(pd.Ny*sizeof(double));
+//		if (*pda[i] == NULL)
+//		{
+//			printf("Cannot allocate matrix-array number: %d, exiting program...\n", i);
+//			getchar();
+//			exit(0);
+//		}
+//	}
 	return pd;
 }
 
@@ -314,8 +309,12 @@ void simulate(PROGRAMDATA pd)
 PROGRAMDATA pdInit(PROGRAMDATA pd)
 {
 	pd.iter = 0;
-	pd.NyInter = pd.Ny - 1;
-	pd.dy = 1.0 / (double)pd.NyInter;
+	pd.r[0].y = 0.0;
+	pd.r[0].v = 0.0;
+	pd.r[0].a = 0.0;
+	pd.r[0].t = 0.0;
+	pd.r[0].Fd = 0.0;
+	pd.r[0].Fd = 0.0;
 	return pd;
 }
 
@@ -338,7 +337,6 @@ void num_simulation(PROGRAMDATA pd)
 {
 	int i;
 	FILE *f;
-	PLATEPOINT *Hold;
 
 	f = filewrite(pd);
 
@@ -350,15 +348,8 @@ void num_simulation(PROGRAMDATA pd)
 		exit(1);
 	}
 
-	fprintf(f, "iter,pos,mean");
-	for (i = 0; i<pd.Ny; i++){
-		fprintf(f, ",%le", pd.pp[i].r);
-	}
-	fprintf(f, "\n0,0,0");
-	for (i = 0; i<pd.Ny; i++){
-		fprintf(f, ",%le", pd.pp[i].Temp);
-	}
-	fprintf(f, "\n");
+	fprintf(f, "iter,time,drag,position\n");
+	fprintf(f, "0,0,0,0\n");
 
 	pd.iter = 0;
 
@@ -368,35 +359,10 @@ void num_simulation(PROGRAMDATA pd)
 	do
 	{
 		pd.iter++;
-		//Need to reset or else MaxRes will always > abs(Res) after the first iteration
 
-		//Simulates the innerbody, then the boundaries. Writes to pd.pp2
-		pd = num_sim_body(pd);
+		
 
-		//swap the addresses
-		//The addresses will be swapped so that the latest timestep (pp2) will take the place of the old data (pp),
-		//the old data will be overwriten with even newer data.
-		//pp is only ever written to durring initialization. During simulation, it is only read.
-		Hold = pd.pp;
-		pd.pp = pd.pp2;
-		pd.pp2 = Hold;
-
-		//Calculate ThetaMean
-		pd.ThetaMean = 0.0;
-		for (i = 0; i<pd.Ny; i++){
-			pd.ThetaMean += 2 * pd.pp[i].r*pd.pp[i].u*pd.pp[i].Temp*pd.dy;
-		}
-
-		//Print off the maximum residual and root mean squared for each iteration
-		if (pd.iter % pd.div == 0){
-			fprintf(f, "%d,%f,%f", pd.iter, (double)pd.iter*pd.dx, pd.ThetaMean);
-			for (i = 0; i<pd.Ny; i++){
-				fprintf(f, ",%le", pd.pp[i].Temp);
-			}
-			fprintf(f, "\n");
-		}
-
-	} while (pd.ThetaMean<FULL_THERMAL_MEAN && pd.iter <= MAX_ITER);
+	} while ((pd.r[pd.iter].t*pd.dt)<pd.tfinal && pd.iter <= MAX_ITER);
 
 	fclose(f);
 }
@@ -499,8 +465,8 @@ int nint(double d)
 void freepp(PROGRAMDATA pd)
 {
 	int i;
-	free(pd.pp);
-	for (i = 0; i<4; i++){
+	free(pd.r);
+	/*for (i = 0; i<4; i++){
 		free(pd.tri_hold[i]);
-	}
+	}*/
 }
