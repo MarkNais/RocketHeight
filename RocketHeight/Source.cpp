@@ -30,7 +30,7 @@
 #define FULL_THERMAL_MEAN        0.99959            // Temperature is fully developed here
 #define DATA_FILENAME			 "data.txt"
 #define MAX_LINE_LENGTH			 1024
-#define MASS_ROCKET				 0.035
+#define MASS_ROCKET				 0.053
 #define FULL_ENGINE				 0.080
 #define EMPTY_ENGINE			 0.040
 
@@ -43,8 +43,21 @@ typedef struct
 	double t;
 	double Fr;
 	double Fd;
+	double Fg;
+	double Fn;
+
 }
 PLATEPOINT;
+
+
+typedef struct
+{
+	double max;
+	double nom;
+	double maxt;
+	double nomt;
+}
+Rock;
 
 
 typedef struct
@@ -61,6 +74,7 @@ typedef struct
 	int run;		//Run the simulatuon? 1=run 0=dont run
 
 	PLATEPOINT *r;		//The pointer to the first  array of plate points. (t) "current"
+	Rock R;
 
 }
 PROGRAMDATA;
@@ -244,8 +258,7 @@ PROGRAMDATA GetProgramData(FILE *f)
 ********************************************************/
 PROGRAMDATA allocate(PROGRAMDATA pd)
 {
-	int i;
-	pd.Ny = (double)pd.tfinal / pd.dt + 1;
+	pd.Ny = ((double)pd.tfinal / pd.dt) + 1;
 	pd.NyInter = pd.Ny - 1;
 
 	if (pd.Ny<3)
@@ -315,6 +328,36 @@ PROGRAMDATA pdInit(PROGRAMDATA pd)
 	pd.r[0].t = 0.0;
 	pd.r[0].Fd = 0.0;
 	pd.r[0].Fd = 0.0;
+
+	switch (pd.Rocket)
+	{
+	default:
+	case 1:
+		pd.R.max = 10;
+		pd.R.nom = 2.5;
+		pd.R.maxt = 0.25;
+		pd.R.nomt = 0.675;
+		break;
+	case 2:
+		pd.R.max = 13;
+		pd.R.nom = 3.5;
+		pd.R.maxt = 0.14;
+		pd.R.nomt = 1.25;
+		break;
+	case 3:
+		pd.R.max = 12;
+		pd.R.nom = 4.5;
+		pd.R.maxt = 0.2;
+		pd.R.nomt = 0.85;
+		break;
+	case 4:
+		pd.R.max = 14.5;
+		pd.R.nom = 4.5;
+		pd.R.maxt = 0.2;
+		pd.R.nomt = 1.85;
+		break;
+	}
+
 	return pd;
 }
 
@@ -335,8 +378,9 @@ PROGRAMDATA pdInit(PROGRAMDATA pd)
 ********************************************************/
 void num_simulation(PROGRAMDATA pd)
 {
-	int i;
 	FILE *f;
+	double mass;
+	double vold=0.0;
 
 	f = filewrite(pd);
 
@@ -348,7 +392,7 @@ void num_simulation(PROGRAMDATA pd)
 		exit(1);
 	}
 
-	fprintf(f, "iter,time,drag,position\n");
+	fprintf(f, "iter,time,position,Fnet,Fr,Fd,Fg,a,v,mass\n");
 	fprintf(f, "0,0,0,0\n");
 
 	pd.iter = 0;
@@ -359,10 +403,42 @@ void num_simulation(PROGRAMDATA pd)
 	do
 	{
 		pd.iter++;
+		pd.r[0].t = pd.iter*pd.dt;
 
-		
+		if (pd.r[0].t <= pd.R.nomt){
+			mass = MASS_ROCKET + FULL_ENGINE - ((FULL_ENGINE - EMPTY_ENGINE) * pd.r[0].t / pd.R.nomt);
+		}
+		else{
+			mass = MASS_ROCKET + EMPTY_ENGINE;
+		}
+		pd.r[0].Fg = -9.81 * mass;
 
-	} while ((pd.r[pd.iter].t*pd.dt)<pd.tfinal && pd.iter <= MAX_ITER);
+
+		if (pd.r[0].t <= pd.R.maxt){
+			pd.r[0].Fr = pd.R.max * pd.r[0].t / pd.R.maxt;
+		}
+		else if (pd.r[0].t <= pd.R.nomt){
+			pd.r[0].Fr = pd.R.nom;
+		}
+		else{
+			pd.r[0].Fr = 0.0;
+		}
+		pd.r[0].Fd = -0.0018 * pow(vold, 2) + 0.025*vold;
+
+		pd.r[0].Fn = pd.r[0].Fr + pd.r[0].Fd + pd.r[0].Fg;
+
+		pd.r[0].a = pd.r[0].Fn / mass;
+		pd.r[0].v = vold + pd.r[0].a * pd.dt;
+		pd.r[0].y += pd.r[0].v*pd.dt + pd.r[0].a*pow(pd.dt, 2)*0.5;
+
+		vold = pd.r[0].v;
+
+
+		fprintf(f, "%d,%f,%f,%f,%f,%f,%f,%f,%f,%f\n", pd.iter, (double)pd.iter*pd.dt, pd.r[0].y, pd.r[0].Fn, pd.r[0].Fr, pd.r[0].Fd, pd.r[0].Fg, pd.r[0].a, pd.r[0].v,mass);
+
+
+
+	} while (pd.r[0].v >= 0 && (pd.r[0].t*pd.dt)<pd.tfinal && pd.iter <= MAX_ITER);
 
 	fclose(f);
 }
@@ -464,7 +540,6 @@ int nint(double d)
 ********************************************************/
 void freepp(PROGRAMDATA pd)
 {
-	int i;
 	free(pd.r);
 	/*for (i = 0; i<4; i++){
 		free(pd.tri_hold[i]);
